@@ -1,166 +1,132 @@
+import os, time, queue
+from config import Config
+from nextcord.ext import commands, tasks
 import nextcord
-from nextcord.ext import commands
-import matplotlib.pyplot as plt
-from collections import Counter
-
-import io
-import os
-import time
-import queue
-import asyncio
-import aiosqlite
+import matplotlib.pyplot as plot
+import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
 import pandas as pd
-
-create_channels_table = """
-CREATE TABLE IF NOT EXISTS Channels(
-  id   NCHAR(18),
-  name NVARCHAR(24) NOT NULL UNIQUE,
-  PRIMARY KEY(id)
-)
-"""
-create_users_table = """
-CREATE TABLE IF NOT EXISTS Users(
-  id         NCHAR(18),
-  name       NVARCHAR(128) NOT NULL UNIQUE,
-  PRIMARY KEY(id)
-)
-"""
-create_messages_table = """
-CREATE TABLE IF NOT EXISTS Messages(
-  id            NCHAR(18),
-  on_channel_id INTEGER,
-  user_id       INTEGER,
-  time_stamp    INTEGER,
-  content       TEXT NOT NULL,
-  PRIMARY KEY(id)
-  FOREIGN KEY(user_id) REFERENCES Users(id)
-  FOREIGN KEY(on_channel_id) REFERENCES Channels(id)
-)
-"""
+from collections import Counter
 
 class UserMetrics(commands.Cog, name='User Metrics'):
   def __init__(self, bot):
     self.bot = bot
-    self.db_path = "databases/user_data.db"
-
-    # buffer 100 or so messages before inserting into the database
     self.msg_queue = queue.Queue(maxsize=100)
-
-    # TODO(qlavi): now it is getting painful to store it here. move it out
-    self.general_channel_ids = [
-      988202173760405557, # general
-      991016201813626880] # off-topic
-    self.help_channel_ids = [
-      988498937793105920, # help 1
-      988498938782953532, # help 2
-      988498939818934272] # help 3
-
-  async def add_all_users(self, db, member_list):
-    members = ((member.id, member.name) for member in member_list)
-    insert_query = "INSERT OR IGNORE INTO Users(id, name) VALUES (?, ?)"
-    await db.executemany(insert_query, members)
-
-  async def add_all_channels(self, db, channel_list):
-    channels = ((channel.id, channel.name) for channel in channel_list)
-    insert_query = "INSERT OR IGNORE INTO Channels(id, name) VALUES (?, ?)"
-    await db.executemany(insert_query, channels)
-
-  def cog_unload(self):
-    print(f'saving cached messages to {self.db_path}')
-    loop = asyncio.get_running_loop()
-    asyncio.ensure_future(self.flush(), loop=loop)
 
   @commands.Cog.listener()
   async def on_ready(self):
-    if os.path.exists(self.db_path): return
-    print(f'creating: {self.db_path}')
-    guild = self.bot.get_guild(int(self.bot.guild_id))
+    self.bg_data_process.start()
+    self.bg_metrics_collect.start()
 
-    async with aiosqlite.connect(self.db_path) as db:
-      await db.execute(create_messages_table)
-      await db.execute(create_users_table)
-      await db.execute(create_channels_table)
+  def cog_unload(self):
+    self.flush_messages()
 
-      if self.guild:
-        await self.add_all_channels(db, self.guild.channels)
-        await self.add_all_users(db, self.guild.members)
-        await db.commit()
-
-  def pull_msg_from_queue(self):
+  def get_msg_from_queue(self):
     while not self.msg_queue.empty():
       yield self.msg_queue.get()
 
-  async def flush(self):
-    # TODO(qlavi): There is a possibilty that this queue might get a new message WHILE being emptied.
-    insert_query = "INSERT INTO Messages(id, on_channel_id, user_id, time_stamp, content) VALUES (?, ?, ?, ?, ?)"
-    async with aiosqlite.connect(self.db_path) as db:
-      await db.executemany(insert_query, self.pull_msg_from_queue())
-      await db.commit()
+  def flush_messages(self):
+    print("saving cached data")
+    buffer = ''.join(self.get_msg_from_queue())
 
-  @commands.command(name='force_push', help='used for adding new data which might be cached')
-  async def force_push(self, ctx): await self.flush()
+    with open(Config.data_csv_path, 'a') as file:
+      file.write('\n' + buffer)
 
   @commands.Cog.listener()
   async def on_message(self, msg):
     cmd_list = [f'{self.bot.command_prefix}{cmd.name}' for cmd in self.bot.commands]
     if msg.author.bot or (msg.content in cmd_list) or len(msg.content) == 0: return
 
-    if self.msg_queue.full(): await self.flush()
-    self.msg_queue.put(
-      (f'{msg.id}', f'{msg.channel.id}', msg.author.id, msg.created_at.timestamp(), msg.content))
+    if self.msg_queue.full(): self.flush_messages()
+    self.msg_queue.put(f'{msg.channel.id},{msg.author.id},{int(msg.created_at.timestamp())}' + '\n')
 
-  @commands.command(name='user_activity', help="renders a plot of members' activity")
-  async def user_activity(self, ctx):
-    # TODO(qlavi): setup a Async Background Task so data manipulation is not done here.
-    Past_Days = 21
-    Max_Users = 10
-    Discord_Bg_Color = '#36393E'
-    plt.style.use('dark_background')
-
-    plt.rcParams['axes.facecolor']    = Discord_Bg_Color
-    plt.rcParams['savefig.facecolor'] = Discord_Bg_Color
-    fig, axs = plt.subplots(nrows=2)
-
-    async with aiosqlite.connect('databases/user_data.db') as db:
-      msgs_table = await db.execute_fetchall('SELECT * FROM Messages')
-
-    msgs = pd.DataFrame(msgs_table, columns=['id', 'on_channel_id', 'user_id', 'time_stamp', 'content'])
-    msgs = msgs[msgs['time_stamp'] > time.time() - (86400 * Past_Days)]
-    active_users_general = Counter(msgs[msgs['on_channel_id'].isin(self.general_channel_ids)]['user_id'].values)
-    active_users_help = Counter(msgs[msgs['on_channel_id'].isin(self.help_channel_ids)]['user_id'].values)
-
-    users = []
-    msg_counts = []
+  @tasks.loop(hours=1)
+  async def bg_metrics_collect(self):
     guild = self.bot.get_guild(int(self.bot.guild_id))
 
-    for user_id, count in active_users_general.most_common(Max_Users):
-      member = await guild.fetch_member(user_id)
-      users.append(member.name)
-      msg_counts.append(count)
+    online_count = 0
+    for m in guild.members:
+      if m.status == nextcord.Status.online:
+        online_count += 1
 
-    axs[0].barh(users, msg_counts)
-    axs[0].set_title(f'General Users Activity [Past {Past_Days} Days]')
+    with open(Config.metrics_csv_path, 'a') as file:
+      file.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")},{online_count},{guild.member_count}' + '\n')
+
+  @bg_metrics_collect.before_loop
+  async def before_bg_task(self):
+    await self.bot.wait_until_ready()
+
+  @tasks.loop(hours=2)
+  async def bg_data_process(self):
+    guild = self.bot.get_guild(int(self.bot.guild_id))
+    past_days = 10
+    max_users = 10
+    start = time.perf_counter()
+
+    plot.style.use('dark_background')
+    plot.rcParams['axes.facecolor'] = Config.bg_color
+    plot.rcParams['savefig.facecolor'] = Config.bg_color
+    _, axs = plot.subplots(nrows=2)
+
+    df = pd.read_csv(Config.data_csv_path, names=['channel_id', 'user_id', 'created_at'])
+
+    days_limit = time.time() - (86400 * past_days)
+    df = df[df['created_at'] > days_limit]
+    df['users'] = [guild.get_member(usr_id).name for usr_id in df['user_id'].values]
+    df['date'] = pd.to_datetime(df['created_at'], unit='s')
+
+    in_general_channels = df['channel_id'].isin(Config.general_channels)
+    general_user_ids = Counter(df[in_general_channels]['users'].values).most_common(max_users)
+    general_users = pd.DataFrame(general_user_ids, columns=['name', 'count'])
+
+    in_help_channels = df['channel_id'].isin(Config.help_channels)
+    help_user_ids = Counter(df[in_help_channels]['users'].values).most_common(max_users)
+    help_users = pd.DataFrame(help_user_ids, columns=['name', 'count'])
+
+    axs[0].barh(general_users['name'], general_users['count'])
+    axs[0].set_title(f'General Users Activity [Past {past_days} Days')
     axs[0].set_ylim(axs[0].get_ylim()[::-1])
 
-    users = []
-    msg_counts = []
-    for user_id, count in active_users_help.most_common(Max_Users):
-      member = await guild.fetch_member(user_id)
-      users.append(member.name)
-      msg_counts.append(count)
-
-    axs[1].barh(users, msg_counts)
-    axs[1].set_title(f'Helping Users Activity [Past {Past_Days} Days]')
+    axs[1].barh(help_users['name'], help_users['count'])
+    axs[1].set_title(f'Helper Users Activity [Past {past_days} Days')
     axs[1].set_ylim(axs[1].get_ylim()[::-1])
     axs[1].set_xlabel('Message Volume')
 
-    plt.tight_layout()
+    plot.tight_layout()
+    plot.savefig('plots/user_activity.png', format='png')
 
-    image = io.BytesIO()
-    plt.savefig(image, format='png')
-    image.seek(0)
+    df = pd.read_csv(Config.metrics_csv_path, names=['time', 'online', 'total'], parse_dates=['time'])
 
-    await ctx.send('', files=[nextcord.File(image, 'user_activity.png')])
+    df.set_index('time', inplace=True)
+    df = df.resample('60min').mean()
+
+    _, axs = plot.subplots(nrows=2, sharex=True)
+    axs[0].plot(df.index, df['online'], label='Active Users')
+    axs[0].set_ylabel('Active Users')
+    axs[0].set_title('Community Report')
+
+    axs[1].set_ylabel('Total Users')
+    axs[1].plot(df.index, df['total'], label='Total Users')
+    axs[1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d\n%H:%M'))
+    axs[1].xaxis.set_major_locator(mticker.MaxNLocator(nbins=5, prune='lower'))
+
+    plot.tight_layout()
+    plot.savefig('plots/community_report.png', format='png')
+
+    el = time.perf_counter() - start
+    print(f'processing took: {el:.4f}secs')
+
+  @bg_data_process.before_loop
+  async def before_bg_task(self):
+    await self.bot.wait_until_ready()
+
+  @commands.command(help="renders plot of members' activity")
+  async def user_activity(self, ctx):
+    await ctx.send('', files=[nextcord.File('plots/user_activity.png')])
+
+  @commands.command(help="no idea")
+  async def report(self, ctx):
+    await ctx.send('', files=[nextcord.File('plots/community_report.png')])
 
 def setup(bot):
   bot.add_cog(UserMetrics(bot))

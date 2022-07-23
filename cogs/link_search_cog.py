@@ -9,14 +9,16 @@ class Search(commands.Cog, name='Search'):
   def __init__(self, bot):
     self.bot = bot
 
-  @commands.command(name='search_articles', help='search articles in pythonprogramming.net')
+  @commands.command(help='search articles in pythonprogramming.net')
   async def search_articles(self, ctx):
     site_prefix = 'https://pythonprogramming.net'
     tseries_xpath   = "//div[@class='card-panel hoverable']/a[@href]"
     tspecific_xpath = "//div[@class='collection']/a[@href]"
 
-    # splits by space and remove ' (" ' and ' ") '
-    term = ctx.message.content.split()[1][2:-2]
+    begin = ctx.message.content.find('(')
+    end = ctx.message.content.find(')')
+    # remove ' (" ' and ' ") '
+    term = ctx.message.content[begin+2:end-1]
     topic = term.replace(" ", "%20")
     search_link = f'{site_prefix}/search/?q={topic}'
 

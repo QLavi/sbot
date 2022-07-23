@@ -1,5 +1,6 @@
 import nextcord
 from nextcord.ext import commands
+from config import Config
 import os
 import random
 
@@ -7,15 +8,8 @@ class ServerBot_Control(commands.Cog, name='Cog_Control'):
   def __init__(self, bot):
     self.bot = bot
     self.bot.remove_command('help')
-    self.media_perm_role_ids = [
-      988796950411354132, # guido
-      988796949467627520, # import this
-      988796952319758356, # holy grail
-      988796954429501570, # py3ftw
-      988796853757812786, # baby python
-      988796951300571146] # whitespace
-
-  @commands.command(name="members_status", help="get all the members' status")
+    
+  @commands.command(help="get all the members' status")
   async def members_status(self, ctx):
     idle, online, offline = 0, 0, 0
     for member in ctx.guild.members:
@@ -31,14 +25,14 @@ class ServerBot_Control(commands.Cog, name='Cog_Control'):
       f'Offline:  {offline}'
       '```']))
 
-  @commands.command(name='all_cmds', help='Get info about bot commands')
+  @commands.command(help='Get info about bot commands')
   async def all_cmds(self, ctx):
     await ctx.send('\n'.join([
       '```',
       *(f'{cmd.name+":": <17}{cmd.help}' for cmd in self.bot.commands),
       '```']))
 
-  @commands.command(name='reload_cogs', help='Reload all the cogs')
+  @commands.command(help='Reload all the cogs')
   async def reload_cogs(self, ctx):
     reloaded = []
     no_error = True
@@ -69,10 +63,10 @@ class ServerBot_Control(commands.Cog, name='Cog_Control'):
     author = msg.author
 
     if random.randint(1, 100) == 57:
-      already_given = [role for role in author.roles if role.id in self.media_perm_role_ids]
+      already_given = [role for role in author.roles if role.id in Config.media_perm_role]
 
       if not already_given:
-        role_id = random.choice(self.media_perm_role_ids)
+        role_id = random.choice(Config.media_perm_roles)
         role = guild.get_role(role_id)
 
         await author.add_roles(role)
